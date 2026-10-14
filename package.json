@@ -1,0 +1,67 @@
+{
+  "name": "dsh-style-asoul",
+  "version": "0.1.0",
+  "description": "A-SOUL 外观风格插件：亮色基调+可选夜间模式、咖啡色/豆沙绿主色调、自定义背景图（默认嘉然壁纸 alpha 0.3）、设置面板 + 持久化 + 一键还原。适用于 DSH desktop 与 webui。",
+  "type": "module",
+  "main": "lib/index.js",
+  "exports": {
+    ".": {
+      "default": "./lib/index.js"
+    },
+    "./client": {
+      "default": "./lib/client.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "assets",
+    "cordis.patch.yml",
+    "README.md",
+    "RELEASE.md",
+    "scripts"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ZhaoKe1024/dsh-style-asoul.git"
+  },
+  "scripts": {
+    "build": "bash scripts/build.sh",
+    "prepack": "npm run build"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "inject": [
+        "@deepseek-ai/dsh-client-runtime",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ],
+      "platform": "web"
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-tools": ">=0.0.1-rc <2",
+    "cordis": ">=4.0.0-rc <5",
+    "schemastery": "^3.18.0"
+  },
+  "devDependencies": {
+    "@types/node": "^24.13.3",
+    "typescript": "^5.9.3"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "plugin",
+    "theme",
+    "style",
+    "asoul",
+    "dark-mode",
+    "background"
+  ],
+  "license": "MIT"
+}

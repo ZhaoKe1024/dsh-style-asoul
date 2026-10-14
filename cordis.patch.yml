@@ -1,0 +1,8 @@
+# dsh-style-asoul bundle patch: one plugin row added to the profile
+# composition. The row joins the host roster (webServer API + persistence)
+# and the dshClient roster (driven by the package.json `dsh.client`
+# declaration), so the settings page and the style engine load in the browser.
+- insert:
+    - id: dsh-style-asoul
+      name: dsh-style-asoul
+      config: {}
