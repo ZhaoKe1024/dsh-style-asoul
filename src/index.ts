@@ -213,6 +213,18 @@ export function apply(ctx: CtxLike): void {
             json(res, 200, { ok: true, dataUrl: `data:${mimeOf(file)};base64,${b64}` })
             return
           }
+          case 'client-report': {
+            // 页面自诊断：client 把实时计算样式快照上报到这里（report.json），供排查渲染断点。
+            const report = args.report
+            if (typeof report === 'object' && report !== null) {
+              try {
+                mkdirSync(CONFIG_DIR, { recursive: true })
+                writeFileSync(join(CONFIG_DIR, 'report.json'), JSON.stringify(report, null, 2), 'utf8')
+              } catch { /* 诊断落盘失败不阻塞 */ }
+            }
+            json(res, 200, { ok: true })
+            return
+          }
           default: {
             json(res, 400, { ok: false, error: `unknown method: ${method}` })
             return

@@ -1,23 +1,27 @@
 /**
  * dsh-style-asoul — A-SOUL 外观风格插件（client 半边）
  *
- * 能力：
- *  1. 外观设置页（settings.section「外观风格」）：模式（亮色/夜间/跟随系统）、
- *     主色调（默认/咖啡色/豆沙绿）、背景图（开关/透明度/透出强度/自选图片/
- *     恢复默认）、一键还原到系统原始设置。
- *  2. 风格引擎：通过官方 theme 服务 setTheme + overrideTokens 应用模式与主色调；
- *     背景图通过 body::before 固定层 + 半透明 bg-base 呈现。
- *  3. 持久化：配置经 host API 存至 ~/.dsh/plugins/dsh-style-asoul/settings.json。
+ * 背景皮肤引擎按社区已验证方案（dsh-dream-skin）重构：
+ *  1. 壁纸 = 真实 div（position:fixed; z-index:-1，prepend 到 body），
+ *     图片下方垫一层不透明底色（帧被洗透后不露白）；
+ *  2. 底色洗涤 = theme.overrideTokens 覆盖 --dsw-alias-bg-base 与
+ *     --dsw-specific-sidebar-fill（明暗双值），叠加层由官方 presenter
+ *     写入 body 内联 token —— 与社区插件同一条生效链路；
+ *  3. Windows 桌面壳专属结构（html[data-windows-titlebar]、caption 条、
+ *     dshDesktopSidebarSurface）用结构选择器 CSS 处理，不用哈希类名；
+ *  4. 主题服务走 inject: ['slots', 'theme'] 硬依赖（ctx.theme），不做弱探测。
  *
- * 依赖：inject ['slots']；theme 服务通过 ctx.get('theme') 探测（可选）。
+ * 依赖：inject ['slots', 'theme']。
  */
 const PKG = 'dsh-style-asoul'
 const API = `/${PKG}/api`
 const OVERRIDE_ACCENT = `${PKG}/accent`
-const OVERRIDE_BASE = `${PKG}/bg-base`
+const OVERRIDE_WASH = `${PKG}/wash`
+const WASH_ATTR = 'data-dsh-style-asoul-wash'
+const SKIN_CSS_ID = 'dsh-style-asoul-skin'
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
 
-export const inject = ['slots']
+export const inject = ['slots', 'theme']
 
 /* ── 最小 React 面板（模块系统提供 require("react")，无编译期依赖） ── */
 declare const require: (spec: string) => any
@@ -29,9 +33,12 @@ interface ReactLike {
 // eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
 const React: ReactLike = require('react')
 
-/* ── 服务面类型（运行时探测，编译期零依赖） ── */
+/* ── 服务面类型（theme 为硬依赖，编译期零依赖） ── */
 interface ThemeService {
-  getTheme(): { preference?: string }
+  getTheme(): {
+    preference?: string
+    active?: { colorScheme?: 'light' | 'dark' }
+  }
   setTheme(id: string): void
   overrideTokens(source: string, tokens: Record<string, { light: string; dark: string }>): () => void
 }
@@ -49,6 +56,7 @@ interface SlotsLike {
 
 interface CtxLike {
   slots: SlotsLike
+  theme: ThemeService
   get(name: string): unknown
   effect(fn: () => void, label?: string): unknown
   on?(name: string, listener: (snapshot: { preference?: string }) => void): unknown
@@ -62,6 +70,7 @@ interface AsoulBg {
   enabled: boolean
   image: string
   alpha: number
+  /** 底色不透明度（洗涤强度，0.05~1；越小壁纸越透出） */
   baseOpacity: number
 }
 
@@ -75,7 +84,7 @@ interface AsoulConfig {
 const DEFAULT_CONFIG: AsoulConfig = {
   mode: 'light',
   accent: 'default',
-  bg: { enabled: true, image: '__default__', alpha: 0.3, baseOpacity: 0.6 },
+  bg: { enabled: true, image: '__default__', alpha: 0.3, baseOpacity: 0.12 },
 }
 
 /* ── 主色调调色板（token → {light, dark}） ── */
@@ -108,11 +117,20 @@ const ACCENT_PALETTES: Record<Exclude<AsoulAccent, 'default'>, AccentPalette> = 
 
 /* ── 引擎状态 ── */
 let cfg: AsoulConfig | null = null
-let theme: ThemeService | null = null
 let lastPreference = 'system'
-let defaultDataUrl = ''
+/* 默认壁纸由构建脚本嵌入 bundle（dsh-app:// 自定义协议页面经 API 拉大图不可靠） */
+const EMBEDDED_DEFAULT_IMAGE = '__DSH_ASOUL_EMBED__'
+let defaultDataUrl = EMBEDDED_DEFAULT_IMAGE.startsWith('data:image/') ? EMBEDDED_DEFAULT_IMAGE : ''
 let accentDispose: (() => void) | null = null
-let baseDispose: (() => void) | null = null
+let washDispose: (() => void) | null = null
+let wallpaperEl: HTMLDivElement | null = null
+let applyingBg = false
+
+/* 安装版官方明暗底色（design-platform.css 的 bg-base / sidebar-fill） */
+const BASE_LIGHT = 'rgb(255, 255, 255)'
+const BASE_DARK = 'rgb(21, 21, 23)'
+const SIDE_LIGHT = 'rgb(249, 250, 251)'
+const SIDE_DARK = 'rgb(21, 21, 22)'
 
 /* ── 面板 UI 引用（sync 时刷新） ── */
 let modeBtns: Record<string, HTMLButtonElement> = {}
@@ -135,16 +153,19 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, cls?: string, text?: 
   return node
 }
 
-function isThemeService(v: unknown): v is ThemeService {
-  return typeof v === 'object' && v !== null
-    && typeof (v as ThemeService).getTheme === 'function'
-    && typeof (v as ThemeService).setTheme === 'function'
-    && typeof (v as ThemeService).overrideTokens === 'function'
-}
-
 function clamp(n: number, lo: number, hi: number): number {
   if (typeof n !== 'number' || Number.isNaN(n)) return lo
   return Math.min(hi, Math.max(lo, n))
+}
+
+function toRgba(rgb: string, alpha: number): string {
+  const m = /rgb\((\d+),\s*(\d+),\s*(\d+)\)/.exec(rgb)
+  if (!m) return rgb
+  return `rgba(${m[1]}, ${m[2]}, ${m[3]}, ${clamp(alpha, 0, 1)})`
+}
+
+function cssUrl(url: string): string {
+  return url.replace(/["'\\\n\r]/g, '')
 }
 
 function normalizeLocal(raw: unknown): AsoulConfig {
@@ -200,7 +221,22 @@ function status(text: string, isErr = false): void {
   }
 }
 
-/* ── 风格引擎 ── */
+/* ── 背景皮肤引擎（社区方案：真实 div + 底垫色 + token 洗涤 + wash 标记） ── */
+function currentScheme(): 'light' | 'dark' {
+  return themeActive() === 'dark' ? 'dark' : 'light'
+}
+
+function themeActive(): string | undefined {
+  return ctxTheme()?.getTheme()?.active?.colorScheme
+}
+
+function ctxTheme(): ThemeService | null {
+  // 由模块级 themeService 引用（apply 时注入）
+  return themeServiceRef
+}
+
+let themeServiceRef: ThemeService | null = null
+
 function resolveImageUrl(): string {
   const c = cfg
   if (!c || !c.bg.enabled) return ''
@@ -208,48 +244,83 @@ function resolveImageUrl(): string {
   return c.bg.image.startsWith('data:image/') ? c.bg.image : ''
 }
 
-function cssUrl(url: string): string {
-  return url.replace(/["'\\\n\r]/g, '')
+function ensureWallpaperEl(): HTMLDivElement {
+  if (wallpaperEl === null || !document.body.contains(wallpaperEl)) {
+    wallpaperEl = document.createElement('div')
+    wallpaperEl.setAttribute('data-dsh-style-asoul-wallpaper', '1')
+    wallpaperEl.style.cssText = 'position:fixed;inset:0;z-index:-1;pointer-events:none;background-size:cover;background-position:center;background-repeat:no-repeat;'
+    document.body.prepend(wallpaperEl)
+  }
+  return wallpaperEl
 }
 
-function applyBgDom(): void {
-  const c = cfg
-  const html = document.documentElement
-  if (!c || !c.bg.enabled) {
-    html.classList.remove('dsh-style-asoul-bg')
-    html.style.removeProperty('--dsh-style-asoul-bg-image')
-    html.style.removeProperty('--dsh-style-asoul-bg-alpha')
-    return
+function setWashAttr(active: boolean): void {
+  const root = document.documentElement
+  if (active) root.setAttribute(WASH_ATTR, '1')
+  else root.removeAttribute(WASH_ATTR)
+}
+
+/** 应用/拆除背景皮肤（不依赖 React；重新进入有防重入保护）。 */
+function applyBackground(): void {
+  if (applyingBg) return
+  applyingBg = true
+  try {
+    const c = cfg
+    if (!c || !c.bg.enabled) {
+      teardownBackground()
+      return
+    }
+    const url = resolveImageUrl()
+    const wall = ensureWallpaperEl()
+    const scheme = currentScheme()
+    // 不透明底垫：帧被洗透后，图片解码中/缺失时不会露出白色画布
+    wall.style.backgroundColor = scheme === 'dark' ? BASE_DARK : BASE_LIGHT
+    wall.style.backgroundImage = url ? `url("${cssUrl(url)}")` : 'none'
+    wall.style.opacity = String(clamp(c.bg.alpha, 0, 1))
+    // token 洗涤（社区同链路：官方 presenter 会把该层写到 body 内联 token）
+    const wash = clamp(c.bg.baseOpacity, 0.05, 1)
+    const sideWash = Math.min(1, wash + 0.12)
+    if (washDispose) {
+      washDispose()
+      washDispose = null
+    }
+    if (themeServiceRef) {
+      washDispose = themeServiceRef.overrideTokens(OVERRIDE_WASH, {
+        '--dsw-alias-bg-base': { light: toRgba(BASE_LIGHT, wash), dark: toRgba(BASE_DARK, wash) },
+        '--dsw-specific-sidebar-fill': { light: toRgba(SIDE_LIGHT, sideWash), dark: toRgba(SIDE_DARK, sideWash) },
+      })
+    }
+    setWashAttr(true)
+  } finally {
+    applyingBg = false
   }
-  const url = resolveImageUrl()
-  html.classList.add('dsh-style-asoul-bg')
-  html.style.setProperty('--dsh-style-asoul-bg-image', url ? `url("${cssUrl(url)}")` : 'none')
-  html.style.setProperty('--dsh-style-asoul-bg-alpha', String(clamp(c.bg.alpha, 0, 1)))
+}
+
+function teardownBackground(): void {
+  if (wallpaperEl !== null) {
+    wallpaperEl.remove()
+    wallpaperEl = null
+  }
+  if (washDispose) {
+    washDispose()
+    washDispose = null
+  }
+  setWashAttr(false)
 }
 
 /** 将当前配置实时应用到界面（不落盘）。 */
 function applyVisual(): void {
   const c = cfg
   if (!c) return
-  if (theme) {
+  if (themeServiceRef) {
     accentDispose?.()
     accentDispose = null
     if (c.accent !== 'default') {
-      accentDispose = theme.overrideTokens(OVERRIDE_ACCENT, ACCENT_PALETTES[c.accent])
+      accentDispose = themeServiceRef.overrideTokens(OVERRIDE_ACCENT, ACCENT_PALETTES[c.accent])
     }
-    baseDispose?.()
-    baseDispose = null
-    if (c.bg.enabled) {
-      baseDispose = theme.overrideTokens(OVERRIDE_BASE, {
-        '--dsw-alias-bg-base': {
-          light: `rgba(255, 255, 255, ${clamp(c.bg.baseOpacity, 0.05, 1)})`,
-          dark: `rgba(21, 21, 23, ${clamp(c.bg.baseOpacity, 0.05, 1)})`,
-        },
-      })
-    }
-    theme.setTheme(c.mode)
+    themeServiceRef.setTheme(c.mode)
   }
-  applyBgDom()
+  applyBackground()
   sync()
 }
 
@@ -258,9 +329,45 @@ async function ensureDefaultImage(): Promise<void> {
   const res = await apiCall('get-default-image')
   if (res?.ok && typeof res.dataUrl === 'string' && res.dataUrl.startsWith('data:image/')) {
     defaultDataUrl = res.dataUrl
-    applyBgDom()
+    applyBackground()
     sync()
+    reportToHost()
   }
+}
+
+/** 页面自诊断：把实时计算样式快照上报 host（report.json），便于定位渲染断点。 */
+let lastReportAt = 0
+function reportToHost(): void {
+  const now = Date.now()
+  if (now - lastReportAt < 800) return
+  lastReportAt = now
+  void (async () => {
+    try {
+      const body = document.body
+      const cs = getComputedStyle(body)
+      const html = document.documentElement
+      const frame = document.querySelector('div:has(> [data-shell-overlay])') as HTMLElement | null
+      const wall = wallpaperEl
+      await apiCall('client-report', {
+        report: {
+          at: new Date().toISOString(),
+          url: location.href,
+          preference: themeServiceRef ? themeServiceRef.getTheme().preference : null,
+          activeScheme: themeActive(),
+          cfg,
+          washAttr: html.getAttribute(WASH_ATTR),
+          wallExists: wall !== null && document.body.contains(wall),
+          wallBgImage: wall ? wall.style.backgroundImage.slice(0, 64) : 'no-wall',
+          wallOpacity: wall ? wall.style.opacity : 'no-wall',
+          wallBgColor: wall ? wall.style.backgroundColor : 'no-wall',
+          bodyBgBaseVar: cs.getPropertyValue('--dsw-alias-bg-base'),
+          bodyBgColor: cs.backgroundColor,
+          frameBg: frame ? getComputedStyle(frame).backgroundColor : 'no-frame-el',
+          defaultImageLoaded: defaultDataUrl.length > 0,
+        },
+      })
+    } catch { /* 诊断失败静默 */ }
+  })()
 }
 
 async function applyAndSave(): Promise<void> {
@@ -275,6 +382,7 @@ async function applyAndSave(): Promise<void> {
     status('已保存')
   }
   sync()
+  reportToHost()
 }
 
 /** 一键还原：恢复插件启用前的主题偏好，清除主色调/背景，并以中性配置落盘。 */
@@ -282,13 +390,14 @@ async function doReset(): Promise<void> {
   const c = cfg
   if (!c) return
   if (!window.confirm('确定还原到插件启用前的系统原始设置吗？主色调、背景图与自定义配置都会被清除。')) return
+  const pref = themeServiceRef ? themeServiceRef.getTheme().preference : undefined
   const orig: AsoulMode = (c.originalPreference === 'light' || c.originalPreference === 'dark' || c.originalPreference === 'system')
     ? c.originalPreference
-    : (theme ? (theme.getTheme().preference === 'light' || theme.getTheme().preference === 'dark' || theme.getTheme().preference === 'system' ? theme.getTheme().preference as AsoulMode : 'system') : 'system')
+    : (pref === 'light' || pref === 'dark' || pref === 'system' ? pref : 'system')
   const neutral: AsoulConfig = {
     mode: orig,
     accent: 'default',
-    bg: { enabled: false, image: '__default__', alpha: 0.3, baseOpacity: 0.6 },
+    bg: { enabled: false, image: '__default__', alpha: 0.3, baseOpacity: 0.12 },
     originalPreference: orig,
   }
   const res = await apiCall('set-config', { config: neutral })
@@ -299,32 +408,6 @@ async function doReset(): Promise<void> {
   cfg = neutral
   applyVisual()
   status('已还原到系统原始设置')
-}
-
-/* ── 主题服务发现 ── */
-function adoptTheme(service: ThemeService): void {
-  theme = service
-  lastPreference = service.getTheme().preference ?? lastPreference
-  if (cfg && !cfg.originalPreference) {
-    // 首次捕获系统原始偏好（一键还原目标），先捕获后应用
-    cfg.originalPreference = lastPreference
-    void apiCall('set-config', { config: cfg })
-  }
-  if (cfg) applyVisual()
-}
-
-function watchTheme(ctx: CtxLike): void {
-  let tries = 0
-  const timer = window.setInterval(() => {
-    const candidate = ctx.get('theme')
-    if (isThemeService(candidate)) {
-      window.clearInterval(timer)
-      adoptTheme(candidate)
-    } else if (++tries >= 66) {
-      window.clearInterval(timer)
-    }
-  }, 150)
-  ctx.effect(() => window.clearInterval(timer), `${PKG}: theme watcher`)
 }
 
 /* ── 面板 UI ── */
@@ -456,7 +539,7 @@ function mountPanel(container: HTMLElement): () => void {
   alphaInput = alpha.input
   alphaValue = alpha.value
 
-  const base = sliderRow(bgCard, '界面透出强度', 5, 100, (v) => {
+  const base = sliderRow(bgCard, '底色不透明度', 5, 100, (v) => {
     if (!cfg) return
     cfg.bg.baseOpacity = v / 100
     applyVisual()
@@ -505,7 +588,7 @@ function mountPanel(container: HTMLElement): () => void {
   actions.appendChild(pickBtn)
   actions.appendChild(defBtn)
   bgCard.appendChild(actions)
-  bgCard.appendChild(el('p', 'asoul-hint', '默认图来自插件内置 assets/jiaran_1.jpg（原图 9600×5500 已压缩为 2560px）。自选图片以 dataURL 存入 ~/.dsh/plugins/dsh-style-asoul/settings.json（上限 8MB）。'))
+  bgCard.appendChild(el('p', 'asoul-hint', '底色不透明度越小，壁纸透出越明显（官方壳有 3 层底色叠加，12% 时壁纸清晰可见）。默认图来自插件内置 assets/jiaran_1.jpg；自选图片以 dataURL 存入 ~/.dsh/plugins/dsh-style-asoul/settings.json（上限 8MB）。'))
   page.appendChild(bgCard)
 
   /* 一键还原 */
@@ -553,20 +636,8 @@ function AsoulSettingsPage(): unknown {
 
 /* ── 入口 ── */
 export function apply(ctx: CtxLike): void {
-  // 背景层 CSS（随插件生命周期清理）
-  const style = document.createElement('style')
-  style.dataset.plugin = PKG
-  style.textContent = BG_CSS
-  document.head.appendChild(style)
-  ctx.effect(() => {
-    style.remove()
-  }, `${PKG}: background css`)
-
-  // theme 服务探测（可能晚于本插件就绪）
-  const maybe = ctx.get('theme')
-  if (isThemeService(maybe)) adoptTheme(maybe)
-  else watchTheme(ctx)
-
+  themeServiceRef = ctx.theme
+  installSkinCss(ctx)
   // 跟随官方 Appearance 行切换时同步面板显示
   if (typeof ctx.on === 'function') {
     ctx.on('theme/change', (snapshot) => {
@@ -574,7 +645,6 @@ export function apply(ctx: CtxLike): void {
       sync()
     })
   }
-
   // 设置页注册（settings.section 由官方设置壳声明）
   ctx.slots.inject('settings.section', () => ctx.slots.register({
     name: 'settings.section',
@@ -589,29 +659,44 @@ export function apply(ctx: CtxLike): void {
 async function init(): Promise<void> {
   const res = await apiCall('get-config')
   cfg = res?.ok && res.config ? normalizeLocal(res.config) : { ...DEFAULT_CONFIG }
-  if (theme) adoptTheme(theme)
-  else applyVisual()
+  lastPreference = themeServiceRef?.getTheme().preference ?? lastPreference
+  if (themeServiceRef && !cfg.originalPreference) {
+    // 首次捕获系统原始偏好（一键还原目标），先捕获后应用
+    cfg.originalPreference = lastPreference
+    void apiCall('set-config', { config: cfg })
+  }
+  applyVisual()
   if (cfg.bg.enabled && cfg.bg.image === '__default__') void ensureDefaultImage()
   sync()
+  reportToHost()
 }
 
-/* ── 全局背景层 CSS ── */
-const BG_CSS = `
-html.dsh-style-asoul-bg, html.dsh-style-asoul-bg body {
+/* ── 结构洗涤 CSS（社区方案：结构选择器 + wash 标记，不用哈希类名） ── */
+const SKIN_CSS = `
+.dshDesktopSidebarSurface { --dsw-specific-sidebar-fill: inherit !important; }
+html[${WASH_ATTR}] .dshDesktopSidebarSurface { background-color: transparent !important; }
+html[data-windows-titlebar][${WASH_ATTR}] div:has(> [data-shell-overlay]) {
   background-color: transparent !important;
+  --dsh-windows-content-radius: 0px !important;
 }
-html.dsh-style-asoul-bg body::before {
-  content: "";
-  position: fixed;
-  inset: 0;
-  z-index: -1;
-  background-image: var(--dsh-style-asoul-bg-image, none);
-  background-size: cover;
-  background-position: center;
-  opacity: var(--dsh-style-asoul-bg-alpha, 0.3);
-  pointer-events: none;
+html[data-windows-titlebar][${WASH_ATTR}] div:has(> [data-shell-overlay])::before {
+  background: linear-gradient(var(--dsw-alias-bg-base), var(--dsw-alias-bg-base)) var(--dsw-alias-bg-base) !important;
 }
 `
+
+/** 安装洗涤样式表（按 id 复用，重复装配不堆积）。 */
+function installSkinCss(ctx: CtxLike): void {
+  let sheet = document.getElementById(SKIN_CSS_ID) as HTMLStyleElement | null
+  if (sheet === null || String(sheet.tagName || '').toUpperCase() !== 'STYLE') {
+    sheet = document.createElement('style')
+    sheet.id = SKIN_CSS_ID
+    ;(document.head || document.body).appendChild(sheet)
+  }
+  sheet.textContent = SKIN_CSS
+  ctx.effect(() => {
+    if (document.getElementById(SKIN_CSS_ID) === sheet) sheet.remove()
+  }, `${PKG}: skin css`)
+}
 
 /* ── 面板 CSS（全部走主题 token，随明暗/主色调自动适配） ── */
 const PANEL_CSS = `
