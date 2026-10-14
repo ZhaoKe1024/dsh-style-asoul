@@ -82,7 +82,7 @@ export const DEFAULT_CONFIG: AsoulConfig = Object.freeze({
 })
 
 const MODES: readonly string[] = ['light', 'dark', 'system']
-const ACCENTS: readonly string[] = ['default', 'coffee', 'green']
+const ACCENTS: readonly string[] = ['default', 'coffee', 'green', 'bella', 'diana', 'eileen']
 
 function clamp(n: number, lo: number, hi: number): number {
   if (typeof n !== 'number' || Number.isNaN(n)) return lo

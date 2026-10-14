@@ -64,7 +64,8 @@ interface CtxLike {
 
 /* ── 配置类型（与 host 保持一致） ── */
 type AsoulMode = 'light' | 'dark' | 'system'
-type AsoulAccent = 'default' | 'coffee' | 'green'
+type AsoulAccent = 'default' | 'coffee' | 'green' | 'bella' | 'diana' | 'eileen'
+const ACCENT_IDS: readonly AsoulAccent[] = ['default', 'coffee', 'green', 'bella', 'diana', 'eileen']
 
 interface AsoulBg {
   enabled: boolean
@@ -112,6 +113,42 @@ const ACCENT_PALETTES: Record<Exclude<AsoulAccent, 'default'>, AccentPalette> = 
     '--dsw-specific-sidebar-nav-item-active-accent': { light: 'rgb(228, 240, 232)', dark: 'rgb(41, 66, 52)' },
     '--dsw-specific-bubble': { light: 'rgb(234, 243, 237)', dark: 'rgb(38, 55, 46)' },
     '--dsw-specific-bubble-highlight': { light: 'rgb(217, 233, 223)', dark: 'rgb(41, 66, 52)' },
+  },
+  /* 贝拉 #BD7D74 —— 灰调玫瑰 */
+  bella: {
+    '--dsw-alias-state-business-primary': { light: 'rgb(189, 125, 116)', dark: 'rgb(222, 164, 157)' },
+    '--dsw-alias-state-business-tertiary': { light: 'rgb(247, 236, 234)', dark: 'rgb(84, 60, 56)' },
+    '--dsw-alias-button-info-fill': { light: 'rgb(189, 125, 116)', dark: 'rgb(222, 164, 157)' },
+    '--dsw-alias-button-info-hover': { light: 'rgb(207, 152, 145)', dark: 'rgb(235, 190, 185)' },
+    '--dsw-alias-brand-primary-new-colorprimary-new-color': { light: 'rgb(189, 125, 116)', dark: 'rgb(222, 164, 157)' },
+    '--dsw-alias-label-primary-bluish': { light: 'rgb(189, 125, 116)', dark: 'rgb(222, 164, 157)' },
+    '--dsw-specific-sidebar-nav-item-active-accent': { light: 'rgb(247, 236, 234)', dark: 'rgb(84, 60, 56)' },
+    '--dsw-specific-bubble': { light: 'rgb(249, 240, 239)', dark: 'rgb(64, 48, 46)' },
+    '--dsw-specific-bubble-highlight': { light: 'rgb(244, 229, 227)', dark: 'rgb(84, 60, 56)' },
+  },
+  /* 嘉然 #E799B0 —— 柔粉 */
+  diana: {
+    '--dsw-alias-state-business-primary': { light: 'rgb(231, 153, 176)', dark: 'rgb(242, 175, 194)' },
+    '--dsw-alias-state-business-tertiary': { light: 'rgb(252, 239, 244)', dark: 'rgb(96, 60, 73)' },
+    '--dsw-alias-button-info-fill': { light: 'rgb(231, 153, 176)', dark: 'rgb(242, 175, 194)' },
+    '--dsw-alias-button-info-hover': { light: 'rgb(240, 178, 195)', dark: 'rgb(248, 200, 213)' },
+    '--dsw-alias-brand-primary-new-colorprimary-new-color': { light: 'rgb(231, 153, 176)', dark: 'rgb(242, 175, 194)' },
+    '--dsw-alias-label-primary-bluish': { light: 'rgb(214, 122, 150)', dark: 'rgb(242, 175, 194)' },
+    '--dsw-specific-sidebar-nav-item-active-accent': { light: 'rgb(252, 239, 244)', dark: 'rgb(96, 60, 73)' },
+    '--dsw-specific-bubble': { light: 'rgb(253, 244, 247)', dark: 'rgb(72, 50, 58)' },
+    '--dsw-specific-bubble-highlight': { light: 'rgb(250, 233, 239)', dark: 'rgb(96, 60, 73)' },
+  },
+  /* 乃琳 #576690 —— 靛蓝 */
+  eileen: {
+    '--dsw-alias-state-business-primary': { light: 'rgb(87, 102, 144)', dark: 'rgb(150, 163, 204)' },
+    '--dsw-alias-state-business-tertiary': { light: 'rgb(234, 237, 245)', dark: 'rgb(52, 59, 86)' },
+    '--dsw-alias-button-info-fill': { light: 'rgb(87, 102, 144)', dark: 'rgb(150, 163, 204)' },
+    '--dsw-alias-button-info-hover': { light: 'rgb(112, 127, 168)', dark: 'rgb(172, 184, 219)' },
+    '--dsw-alias-brand-primary-new-colorprimary-new-color': { light: 'rgb(87, 102, 144)', dark: 'rgb(150, 163, 204)' },
+    '--dsw-alias-label-primary-bluish': { light: 'rgb(87, 102, 144)', dark: 'rgb(150, 163, 204)' },
+    '--dsw-specific-sidebar-nav-item-active-accent': { light: 'rgb(234, 237, 245)', dark: 'rgb(52, 59, 86)' },
+    '--dsw-specific-bubble': { light: 'rgb(239, 241, 247)', dark: 'rgb(43, 48, 66)' },
+    '--dsw-specific-bubble-highlight': { light: 'rgb(228, 232, 242)', dark: 'rgb(52, 59, 86)' },
   },
 }
 
@@ -172,7 +209,7 @@ function normalizeLocal(raw: unknown): AsoulConfig {
   const input = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
   const bgIn = (typeof input.bg === 'object' && input.bg !== null ? input.bg : {}) as Record<string, unknown>
   const mode: AsoulMode = input.mode === 'dark' || input.mode === 'system' || input.mode === 'light' ? input.mode : DEFAULT_CONFIG.mode
-  const accent: AsoulAccent = input.accent === 'coffee' || input.accent === 'green' || input.accent === 'default' ? input.accent : DEFAULT_CONFIG.accent
+  const accent: AsoulAccent = ACCENT_IDS.includes(input.accent as AsoulAccent) ? input.accent as AsoulAccent : DEFAULT_CONFIG.accent
   const out: AsoulConfig = {
     mode,
     accent,
@@ -489,6 +526,9 @@ function mountPanel(container: HTMLElement): () => void {
     { id: 'default', label: '默认（当前）', color: '#4176E6' },
     { id: 'coffee', label: '咖啡色', color: '#925E37' },
     { id: 'green', label: '豆沙绿', color: '#4A7C59' },
+    { id: 'bella', label: '贝拉', color: '#BD7D74' },
+    { id: 'diana', label: '嘉然', color: '#E799B0' },
+    { id: 'eileen', label: '乃琳', color: '#576690' },
   ]
   for (const def of accentDefs) {
     const btn = el('button', 'asoul-swatch', def.label) as HTMLButtonElement
