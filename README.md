@@ -1,6 +1,6 @@
 # dsh-style-asoul
 
-A-SOUL 外观风格插件（v0.1）——给 DeepSeek Harness 换一套你喜欢的外观：亮色基调 + 可选夜间模式，主色调可选咖啡色 / 豆沙绿，支持自定义背景图（默认嘉然壁纸，透明度 0.3），带设置面板、持久化与一键还原。
+A-SOUL 外观风格插件（v0.1）——给 DeepSeek Harness 换一套你喜欢的外观：亮色基调 + 可选夜间模式，主色调 6 款可选（默认蓝 / 咖啡色 / 豆沙绿 / 贝拉 / 嘉然 / 乃琳），支持自定义背景图（默认嘉然壁纸，透明度 0.3），带设置面板、持久化与一键还原。
 
 适用于 **DSH desktop（桌面端）** 与 **webui（网页端）**。
 
@@ -12,7 +12,7 @@ A-SOUL 外观风格插件（v0.1）——给 DeepSeek Harness 换一套你喜欢
 | 功能 | 说明 |
 | --- | --- |
 | 模式 | 亮色（默认）/ 夜间 / 跟随系统 |
-| 主色调 | 默认（当前 DeepSeek 蓝，不变）/ 咖啡色 / 豆沙绿——只替换主色相关 token（链接、激活态、按钮、气泡），明暗两套配色齐备 |
+| 主色调 | 默认（当前 DeepSeek 蓝，不变）/ 咖啡色 / 豆沙绿 / 贝拉 `#BD7D74` / 嘉然 `#E799B0` / 乃琳 `#576690`——只替换主色相关 token（链接、激活态、按钮、气泡），每款明暗两套配色齐备 |
 | 背景图 | 内置嘉然壁纸（assets/jiaran_1.jpg，由 9600×5500 原图压缩为 2560px），来源[bilibili](https://www.bilibili.com/opus/1258687238954287128)；可自选任意图片（≤8MB）；图片透明度默认 **0.3**、可调；"界面透出强度"控制界面底色让背景透出的程度 |
 | 设置面板 | 设置 → 「外观风格」页：所有选项可视化调节，实时生效 |
 | 持久化 | 配置存于 `~/.dsh/plugins/dsh-style-asoul/settings.json`（经 host API，desktop/webui 通用） |
@@ -21,17 +21,25 @@ A-SOUL 外观风格插件（v0.1）——给 DeepSeek Harness 换一套你喜欢
 ## 安装
 
 **方式一（推荐）：插件管理 UI**
-设置 → 插件 → 从 GitHub 安装：`github:<你的用户名>/dsh-style-asoul`
+设置 → 插件 → 从 GitHub 安装：`github:ZhaoKe1024/dsh-style-asoul`
 
 **方式二：命令行**
 ```bash
-dsh plugin add --profile <你的 profile> github:<你的用户名>/dsh-style-asoul
+dsh plugin add --profile <profile> github:ZhaoKe1024/dsh-style-asoul
 ```
 
 **方式三：本地 tgz**
 ```bash
-dsh plugin add --profile <你的 profile> ./dsh-style-asoul-0.1.0.tgz
+dsh plugin add --profile <profile> ./dsh-style-asoul-0.1.0.tgz
 ```
+
+> `<profile>` 是 DSH 的「运行配置组」名，即 `~/.dsh/profiles/` 目录下的文件夹名。
+> 常见取值：
+> - `desktop` —— 桌面端应用使用的配置组（本插件在本机即装于此）
+> - `web` —— 网页端（webui）使用的配置组
+> - `dsh-tui` —— 终端界面使用的配置组
+>
+> 具体以本机 `~/.dsh/profiles/` 下实际存在的目录名为准（每个目录名都是一个可用取值）；省略 `--profile` 时安装到 DSH 启动时默认加载的配置组。
 
 **方式四（开发模式）：本地目录链接**
 在 profile 的 `package.json` 中声明：
@@ -93,7 +101,7 @@ npm run build          # bash scripts/build.sh：tsc 编译 host + client + 包�
 
 ## 技术说明
 
-- 主题完全走官方 theme 服务：模式 = `theme.setTheme`（持久化进官方 Appearance 设置）；主色调/背景透出 = `theme.overrideTokens`（{light, dark} 分层覆盖，卸载即还原）；背景图 = `body::before` 固定层 + `--dsw-alias-bg-base` 半透明化。
+- 主题完全走官方 theme 服务：模式 = `theme.setTheme`（持久化进官方 Appearance 设置）；主色调 = `theme.overrideTokens`（{light, dark} 分层覆盖，卸载即还原）；背景皮肤 = 真实壁纸 div 层（fixed、z-index:-1、默认图直接内嵌 bundle）+ `--dsw-alias-bg-base` / `--dsw-specific-sidebar-fill` token 洗涤 + Windows 桌面壳结构选择器（参照社区 dsh-dream-skin 的验证方案）。
 - 面板 UI 全部使用官方 token（`--dsw-alias-*`），自动跟随明暗模式与主色调，无硬编码颜色。
 - 与官方「外观」设置共存：官方行切换 light/dark 时本插件面板同步显示，两套入口互不冲突。
 
