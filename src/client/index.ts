@@ -229,6 +229,11 @@ interface ApiResult {
   ok: boolean
   config?: unknown
   dataUrl?: string
+  data?: unknown
+  b64?: string
+  added?: number
+  skipped?: number
+  path?: string
   error?: string
 }
 
@@ -400,6 +405,10 @@ function reportToHost(): void {
           bodyBgBaseVar: cs.getPropertyValue('--dsw-alias-bg-base'),
           bodyBgColor: cs.backgroundColor,
           frameBg: frame ? getComputedStyle(frame).backgroundColor : 'no-frame-el',
+          petElExists: petEl !== null && document.body.contains(petEl),
+          petDisplay: petEl ? petEl.style.display : 'no-pet-el',
+          petEnabled: petData?.pet.enabled ?? null,
+          petPanelOpen,
           defaultImageLoaded: defaultDataUrl.length > 0,
         },
       })
@@ -631,6 +640,27 @@ function mountPanel(container: HTMLElement): () => void {
   bgCard.appendChild(el('p', 'asoul-hint', '底色不透明度越小，壁纸透出越明显（官方壳有 3 层底色叠加，12% 时壁纸清晰可见）。默认图来自插件内置 assets/jiaran_1.jpg；自选图片以 dataURL 存入 ~/.dsh/plugins/dsh-style-asoul/settings.json（上限 8MB）。'))
   page.appendChild(bgCard)
 
+  /* 嘉然桌宠 */
+  const petCard = el('div', 'asoul-card')
+  petCard.appendChild(el('h3', undefined, '嘉然桌宠'))
+  const petRow = el('div', 'asoul-row')
+  petRow.appendChild(el('span', 'asoul-row-label', '启用桌宠'))
+  petToggleInput = el('input') as HTMLInputElement
+  petToggleInput.type = 'checkbox'
+  petToggleInput.className = 'asoul-check'
+  petToggleInput.addEventListener('change', () => {
+    const data = petData
+    if (!data) return
+    data.pet.enabled = petToggleInput?.checked ?? true
+    void petSave()
+    applyPetVisibility()
+  })
+  petRow.appendChild(petToggleInput)
+  petCard.appendChild(petRow)
+  petCard.appendChild(el('p', 'asoul-hint', '右上角悬浮的嘉然桌面宠物：左键拖动位置，右键打开待办面板（主线任务 / 近期任务 / 杂事 / 设置）。待办与位置保存在 ~/.dsh/plugins/dsh-style-asoul/pet.json。'))
+  page.appendChild(petCard)
+  syncPetToggle()
+
   /* 一键还原 */
   const resetCard = el('div', 'asoul-card')
   resetCard.appendChild(el('h3', undefined, '还原'))
@@ -660,6 +690,7 @@ function mountPanel(container: HTMLElement): () => void {
     previewImg = null
     previewNone = null
     statusLine = null
+    petToggleInput = null
   }
 }
 
@@ -673,6 +704,969 @@ function AsoulSettingsPage(): unknown {
   }, [])
   return React.createElement('div', { ref })
 }
+
+/* ═════════════════════════ 嘉然桌宠模块 ═════════════════════════ */
+interface PetTodoItem {
+  id: string
+  name: string
+  tags: string
+  priority: string
+  done: boolean
+}
+
+type PetListKey = 'main' | 'recent' | 'misc'
+type PetTab = PetListKey | 'settings'
+
+interface PetDataLike {
+  lists: Record<PetListKey, PetTodoItem[]>
+  pet: { x: number | null; y: number | null; panelWidth: number; opacity: number; enabled: boolean }
+}
+
+/* 桌宠形象（构建期替换为 data URL，避免 dsh-app:// 协议拉大图失败） */
+const PET_IMG_SRC = '__DSH_ASOUL_PET_EMBED__'
+const PET_LIST_KEYS: PetListKey[] = ['main', 'recent', 'misc']
+const PET_LIST_LABELS: Record<PetListKey, string> = { main: '主线任务', recent: '近期任务', misc: '杂事' }
+
+let petData: PetDataLike | null = null
+let petEl: HTMLDivElement | null = null
+let petPanel: HTMLDivElement | null = null
+let petTab: PetTab = 'main'
+let petPanelOpen = false
+let petDragging = false
+let petDrag = { startX: 0, startY: 0, left: 0, top: 0 }
+let petItemPopup: HTMLDivElement | null = null
+let petStatusLine: HTMLElement | null = null
+let petDragFrom: { key: PetListKey; id: string } | null = null
+let petToggleInput: HTMLInputElement | null = null
+
+function petGenIdLocal(): string {
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+}
+
+/* ── base64 传输助手（dsh-app:// 协议会转坏多字节 UTF-8，中文一律走 base64） ── */
+function b64EncodeJson(value: unknown): string {
+  const bytes = new TextEncoder().encode(JSON.stringify(value))
+  let bin = ''
+  for (let i = 0; i < bytes.length; i += 1) bin += String.fromCharCode(bytes[i])
+  return btoa(bin)
+}
+
+function b64DecodeJson(b64: string): unknown {
+  const bin = atob(b64)
+  const bytes = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i += 1) bytes[i] = bin.charCodeAt(i)
+  return JSON.parse(new TextDecoder('utf-8').decode(bytes))
+}
+
+function normalizePetDataLocal(raw: unknown): PetDataLike {
+  const input = (typeof raw === 'object' && raw !== null ? raw : {}) as Record<string, unknown>
+  const listsIn = (typeof input.lists === 'object' && input.lists !== null ? input.lists : {}) as Record<string, unknown>
+  const lists: Record<PetListKey, PetTodoItem[]> = { main: [], recent: [], misc: [] }
+  for (const key of PET_LIST_KEYS) {
+    const arr = listsIn[key]
+    if (Array.isArray(arr)) {
+      for (const item of arr) {
+        const o = (typeof item === 'object' && item !== null ? item : {}) as Record<string, unknown>
+        const name = typeof o.name === 'string' ? o.name.trim() : ''
+        if (!name) continue
+        lists[key].push({
+          id: typeof o.id === 'string' && o.id ? o.id : petGenIdLocal(),
+          name: name.slice(0, 200),
+          tags: typeof o.tags === 'string' ? o.tags.slice(0, 100) : '',
+          priority: typeof o.priority === 'string' ? o.priority.slice(0, 20) : '',
+          done: o.done === true,
+        })
+      }
+    }
+  }
+  const petIn = (typeof input.pet === 'object' && input.pet !== null ? input.pet : {}) as Record<string, unknown>
+  return {
+    lists,
+    pet: {
+      x: typeof petIn.x === 'number' ? petIn.x : null,
+      y: typeof petIn.y === 'number' ? petIn.y : null,
+      panelWidth: clamp(Number(petIn.panelWidth ?? 360), 280, 520),
+      opacity: clamp(Number(petIn.opacity ?? 0.95), 0.3, 1),
+      enabled: typeof petIn.enabled === 'boolean' ? petIn.enabled : true,
+    },
+  }
+}
+
+async function petSave(): Promise<void> {
+  const data = petData
+  if (!data) return
+  const res = await apiCall('set-pet', { b64: b64EncodeJson(data) })
+  if (!res || !res.ok) petStatus(`保存失败：${res?.error ?? '未知错误'}`, true)
+}
+
+function petStatus(text: string, isErr = false): void {
+  if (!petStatusLine) return
+  petStatusLine.textContent = text
+  petStatusLine.classList.toggle('err', isErr)
+}
+
+function applyPetOpacity(): void {
+  const o = petData?.pet.opacity ?? 0.95
+  if (petEl) petEl.style.opacity = String(o)
+  if (petPanel) petPanel.style.opacity = String(o)
+}
+
+/** 按开关显示/隐藏桌宠（并同步设置页开关控件）。 */
+function applyPetVisibility(): void {
+  const enabled = petData?.pet.enabled ?? true
+  if (petEl) petEl.style.display = enabled ? 'block' : 'none'
+  if (!enabled && petPanelOpen) closePetPanel()
+  syncPetToggle()
+}
+
+/** 同步「外观风格」页里的桌宠开关显示状态。 */
+function syncPetToggle(): void {
+  if (!petToggleInput) return
+  petToggleInput.checked = petData?.pet.enabled ?? true
+}
+
+/* ── 桌宠本体 ── */
+function buildPetEl(): HTMLDivElement {
+  const holder = document.createElement('div')
+  holder.className = 'asoul-pet'
+  const img = document.createElement('img')
+  img.className = 'asoul-pet-img'
+  img.src = PET_IMG_SRC.startsWith('data:image/') ? PET_IMG_SRC : ''
+  img.draggable = false
+  img.alt = '嘉然桌宠'
+  holder.appendChild(img)
+
+  // 左键拖动
+  holder.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return
+    const rect = holder.getBoundingClientRect()
+    petDragging = true
+    petDrag = { startX: e.clientX, startY: e.clientY, left: rect.left, top: rect.top }
+    try { holder.setPointerCapture(e.pointerId) } catch { /* 忽略 */ }
+    e.preventDefault()
+  })
+  holder.addEventListener('pointermove', (e) => {
+    if (!petDragging) return
+    const dx = e.clientX - petDrag.startX
+    const dy = e.clientY - petDrag.startY
+    const w = holder.offsetWidth || 96
+    const h = holder.offsetHeight || 96
+    const left = clamp(petDrag.left + dx, 0, Math.max(0, window.innerWidth - w))
+    const top = clamp(petDrag.top + dy, 0, Math.max(0, window.innerHeight - h))
+    holder.style.left = `${Math.round(left)}px`
+    holder.style.top = `${Math.round(top)}px`
+    holder.style.right = 'auto'
+    holder.style.bottom = 'auto'
+    positionPetPanel()
+  })
+  const finishDrag = (): void => {
+    if (!petDragging) return
+    petDragging = false
+    const rect = holder.getBoundingClientRect()
+    const data = petData
+    if (data) {
+      data.pet.x = Math.round(rect.left)
+      data.pet.y = Math.round(rect.top)
+      void petSave()
+    }
+  }
+  holder.addEventListener('pointerup', finishDrag)
+  holder.addEventListener('pointercancel', finishDrag)
+
+  // 右键弹出面板
+  holder.addEventListener('contextmenu', (e) => {
+    e.preventDefault()
+    togglePetPanel()
+  })
+  return holder
+}
+
+/* ── 面板 ── */
+function buildPetPanel(): HTMLDivElement {
+  const panel = document.createElement('div')
+  panel.className = 'asoul-petpanel'
+  const tabs = document.createElement('div')
+  tabs.className = 'asoul-petpanel-tabs'
+  const body = document.createElement('div')
+  body.className = 'asoul-petpanel-body'
+  panel.appendChild(tabs)
+  panel.appendChild(body)
+
+  const renderTabs = (): void => {
+    tabs.textContent = ''
+    const defs: Array<[PetTab, string]> = [['main', '主线任务'], ['recent', '近期任务'], ['misc', '杂事'], ['settings', '设置']]
+    for (const [key, label] of defs) {
+      const btn = document.createElement('button')
+      btn.type = 'button'
+      btn.className = 'asoul-petpanel-tab' + (petTab === key ? ' on' : '')
+      btn.textContent = label
+      btn.addEventListener('click', () => {
+        petTab = key
+        renderTabs()
+        renderPetBody(body)
+      })
+      tabs.appendChild(btn)
+    }
+  }
+  renderTabs()
+  renderPetBody(body)
+  return panel
+}
+
+function renderPetBody(body: HTMLElement): void {
+  body.textContent = ''
+  closePetItemPopup()
+  if (petTab === 'settings') {
+    renderPetSettings(body)
+    return
+  }
+  const key = petTab as PetListKey
+  const data = petData
+  const list = data ? data.lists[key] : []
+  body.appendChild(el('div', 'asoul-petpanel-title', PET_LIST_LABELS[key]))
+  if (list.length === 0) {
+    body.appendChild(el('div', 'asoul-pet-empty', '（暂无待办）'))
+    return
+  }
+  const listEl = el('div', 'asoul-pet-list')
+  for (const item of list) listEl.appendChild(renderPetItem(key, item))
+  body.appendChild(listEl)
+}
+
+function renderPetItem(key: PetListKey, item: PetTodoItem): HTMLElement {
+  const row = el('div', 'asoul-pet-item')
+  row.draggable = true
+  if (item.done) row.classList.add('done')
+
+  // 左侧：名称 + tags/优先级
+  const main = el('div', 'asoul-pet-item-main')
+  main.appendChild(el('div', 'asoul-pet-item-name', item.name))
+  const meta = el('div', 'asoul-pet-item-meta')
+  if (item.tags) meta.appendChild(el('span', 'asoul-pet-item-tags', item.tags))
+  if (item.priority) meta.appendChild(el('span', 'asoul-pet-item-prio', item.priority))
+  if (meta.childNodes.length > 0) main.appendChild(meta)
+  row.appendChild(main)
+
+  // 右侧：编辑按钮 + 方形勾选框（空框 ⇄ 带对号），打勾整条半透明
+  const editBtn = el('button', 'asoul-pet-editbtn', '✎') as HTMLButtonElement
+  editBtn.type = 'button'
+  editBtn.title = '编辑'
+  editBtn.setAttribute('aria-label', '编辑')
+  editBtn.addEventListener('click', (e) => {
+    e.stopPropagation()
+    startEditItem(key, item, row)
+  })
+  row.appendChild(editBtn)
+
+  const check = el('button', 'asoul-pet-check' + (item.done ? ' on' : '')) as HTMLButtonElement
+  check.type = 'button'
+  check.setAttribute('aria-label', item.done ? '标记为未解决' : '标记为已解决')
+  check.textContent = item.done ? '✓' : ''
+  check.addEventListener('click', (e) => {
+    e.stopPropagation()
+    item.done = !item.done
+    check.classList.toggle('on', item.done)
+    check.textContent = item.done ? '✓' : ''
+    row.classList.toggle('done', item.done)
+    check.setAttribute('aria-label', item.done ? '标记为未解决' : '标记为已解决')
+    void petSave()
+  })
+  row.appendChild(check)
+
+  // 拖动排序
+  row.addEventListener('dragstart', (e) => {
+    petDragFrom = { key, id: item.id }
+    if (e.dataTransfer) e.dataTransfer.effectAllowed = 'move'
+    row.classList.add('dragging')
+  })
+  row.addEventListener('dragend', () => {
+    petDragFrom = null
+    row.classList.remove('dragging')
+  })
+  row.addEventListener('dragover', (e) => {
+    e.preventDefault()
+    if (e.dataTransfer) e.dataTransfer.dropEffect = 'move'
+  })
+  row.addEventListener('drop', (e) => {
+    e.preventDefault()
+    const fromRef = petDragFrom
+    const data = petData
+    if (!fromRef || !data) return
+    if (fromRef.key !== key) return
+    const list = data.lists[key]
+    const from = list.findIndex((t) => t.id === fromRef.id)
+    const to = list.findIndex((t) => t.id === item.id)
+    if (from < 0 || to < 0 || from === to) return
+    const [moved] = list.splice(from, 1)
+    list.splice(to, 0, moved)
+    void petSave()
+    refreshPetPanelBody()
+  })
+
+  // 点击弹出 删除/取消（编辑态下不弹）
+  row.addEventListener('click', () => {
+    if (row.dataset.editing === '1') return
+    closePetItemPopup()
+    const pop = el('div', 'asoul-pet-item-pop')
+    const del = el('button', 'asoul-pet-pop-btn danger', '删除') as HTMLButtonElement
+    const cancel = el('button', 'asoul-pet-pop-btn', '取消') as HTMLButtonElement
+    del.type = 'button'
+    cancel.type = 'button'
+    del.addEventListener('click', (e) => {
+      e.stopPropagation()
+      const data = petData
+      if (!data) return
+      data.lists[key] = data.lists[key].filter((t) => t.id !== item.id)
+      void petSave()
+      refreshPetPanelBody()
+    })
+    cancel.addEventListener('click', (e) => {
+      e.stopPropagation()
+      pop.remove()
+      petItemPopup = null
+    })
+    pop.appendChild(del)
+    pop.appendChild(cancel)
+    row.appendChild(pop)
+    petItemPopup = pop
+  })
+  return row
+}
+
+function closePetItemPopup(): void {
+  if (petItemPopup) {
+    petItemPopup.remove()
+    petItemPopup = null
+  }
+}
+
+/** 行内编辑：把一条待办替换为编辑表单（名称/tags/优先级），保存后同步 pet.json。 */
+function startEditItem(key: PetListKey, item: PetTodoItem, row: HTMLElement): void {
+  closePetItemPopup()
+  row.draggable = false
+  row.dataset.editing = '1'
+  row.classList.add('editing')
+  row.textContent = ''
+
+  const form = el('div', 'asoul-pet-edit')
+  const nameInput = el('input') as HTMLInputElement
+  nameInput.value = item.name
+  nameInput.placeholder = '名称'
+  const tagsInput = el('input') as HTMLInputElement
+  tagsInput.value = item.tags
+  tagsInput.placeholder = 'tags（可选）'
+  const prioSel = el('select') as HTMLSelectElement
+  for (const p of ['', '高', '中', '低']) {
+    const opt = document.createElement('option')
+    opt.value = p
+    opt.textContent = p === '' ? '优先级（可选）' : p
+    prioSel.appendChild(opt)
+  }
+  prioSel.value = item.priority
+
+  const btnRow = el('div', 'asoul-pet-edit-actions')
+  const saveBtn = el('button', 'asoul-pet-btn primary', '保存') as HTMLButtonElement
+  saveBtn.type = 'button'
+  saveBtn.addEventListener('click', () => {
+    const name = nameInput.value.trim()
+    if (!name) {
+      petStatus('名称不能为空', true)
+      return
+    }
+    item.name = name.slice(0, 200)
+    item.tags = tagsInput.value.trim().slice(0, 100)
+    item.priority = prioSel.value
+    void petSave()
+    petStatus('已保存')
+    refreshPetPanelBody()
+  })
+  const cancelBtn = el('button', 'asoul-pet-btn', '取消') as HTMLButtonElement
+  cancelBtn.type = 'button'
+  cancelBtn.addEventListener('click', () => {
+    refreshPetPanelBody()
+  })
+  btnRow.append(saveBtn, cancelBtn)
+  form.append(nameInput, tagsInput, prioSel, btnRow)
+  row.appendChild(form)
+}
+
+function refreshPetPanelBody(): void {
+  if (!petPanel) return
+  const body = petPanel.querySelector('.asoul-petpanel-body') as HTMLElement | null
+  if (!body) return
+  renderPetBody(body)
+}
+
+function petSliderRow(parent: HTMLElement, label: string, min: number, max: number, value: string, onInput: (v: number) => void, onChange: () => void): void {
+  const row = el('div', 'asoul-pet-row')
+  row.appendChild(el('span', 'asoul-pet-row-label', label))
+  const input = el('input') as HTMLInputElement
+  input.type = 'range'
+  input.min = String(min)
+  input.max = String(max)
+  input.step = '1'
+  input.value = value
+  input.className = 'asoul-pet-range'
+  input.addEventListener('input', () => onInput(Number(input.value)))
+  input.addEventListener('change', () => onChange())
+  const val = el('span', 'asoul-pet-row-value', input.value)
+  input.addEventListener('input', () => { val.textContent = input.value })
+  row.appendChild(input)
+  row.appendChild(val)
+  parent.appendChild(row)
+}
+
+function renderPetSettings(body: HTMLElement): void {
+  const data = petData
+  if (!data) return
+  body.appendChild(el('div', 'asoul-petpanel-title', '设置'))
+
+  petSliderRow(body, '面板大小', 280, 520, String(Math.round(data.pet.panelWidth)), (v) => {
+    data.pet.panelWidth = v
+    if (petPanel) petPanel.style.width = `${v}px`
+  }, () => { void petSave() })
+
+  petSliderRow(body, '整体透明度', 30, 100, String(Math.round(data.pet.opacity * 100)), (v) => {
+    data.pet.opacity = v / 100
+    applyPetOpacity()
+  }, () => { void petSave() })
+
+  // 添加待办
+  const form = el('div', 'asoul-pet-form')
+  const listSel = el('select') as HTMLSelectElement
+  for (const k of PET_LIST_KEYS) {
+    const opt = document.createElement('option')
+    opt.value = k
+    opt.textContent = PET_LIST_LABELS[k]
+    listSel.appendChild(opt)
+  }
+  const nameInput = el('input') as HTMLInputElement
+  nameInput.placeholder = '名称'
+  const tagsInput = el('input') as HTMLInputElement
+  tagsInput.placeholder = 'tags（可选）'
+  const prioSel = el('select') as HTMLSelectElement
+  for (const p of ['', '高', '中', '低']) {
+    const opt = document.createElement('option')
+    opt.value = p
+    opt.textContent = p === '' ? '优先级（可选）' : p
+    prioSel.appendChild(opt)
+  }
+  const addBtn = el('button', 'asoul-pet-btn primary', '添加') as HTMLButtonElement
+  addBtn.type = 'button'
+  addBtn.addEventListener('click', () => {
+    const name = nameInput.value.trim()
+    if (!name) {
+      petStatus('请先填写名称', true)
+      return
+    }
+    const data2 = petData
+    if (!data2) return
+    data2.lists[listSel.value as PetListKey].push({
+      id: petGenIdLocal(),
+      name,
+      tags: tagsInput.value.trim(),
+      priority: prioSel.value,
+      done: false,
+    })
+    nameInput.value = ''
+    tagsInput.value = ''
+    void petSave()
+    petStatus('已添加')
+  })
+  form.append(listSel, nameInput, tagsInput, prioSel, addBtn)
+  body.appendChild(form)
+
+  // 导出 / 导入
+  const ioRow = el('div', 'asoul-pet-actions')
+  const exportBtn = el('button', 'asoul-pet-btn', '导出 CSV') as HTMLButtonElement
+  exportBtn.type = 'button'
+  exportBtn.addEventListener('click', () => {
+    void apiCall('export-todos', {}).then((res) => {
+      if (res?.ok) petStatus(`已导出：${res.path ?? ''}`)
+      else petStatus(`导出失败：${res?.error ?? '未知错误'}`, true)
+    })
+  })
+  const importBtn = el('button', 'asoul-pet-btn', '导入（json / csv）') as HTMLButtonElement
+  importBtn.type = 'button'
+  const fileInput = el('input') as HTMLInputElement
+  fileInput.type = 'file'
+  fileInput.accept = '.json,.csv,application/json,text/csv'
+  fileInput.style.display = 'none'
+  importBtn.addEventListener('click', () => fileInput.click())
+  fileInput.addEventListener('change', () => {
+    const file = fileInput.files?.[0]
+    fileInput.value = ''
+    if (!file) return
+    const reader = new FileReader()
+    reader.onload = () => {
+      void handlePetImport(String(reader.result ?? ''), file.name)
+    }
+    reader.onerror = () => petStatus('读取文件失败', true)
+    reader.readAsText(file)
+  })
+  ioRow.append(exportBtn, importBtn)
+  body.appendChild(ioRow)
+
+  body.appendChild(el('p', 'asoul-pet-hint', '导入格式：JSON 数组 [{name, tags?, priority?, list?, done?}]；CSV 表头 name,tags,priority,list,done。list 可写 主线任务/近期任务/杂事 或 main/recent/misc，缺省为杂事；done 为 1/0（或 true/false、是/完成）表示已解决。按名称去重、只追加不覆盖。导出文件保存到 ~/.dsh/plugins/dsh-style-asoul/exports/。'))
+
+  petStatusLine = el('div', 'asoul-pet-status')
+  body.appendChild(petStatusLine)
+}
+
+/* ── CSV 解析/构建 ── */
+function parseCsvRows(text: string): string[][] {
+  const rows: string[][] = []
+  let field = ''
+  let row: string[] = []
+  let inQuotes = false
+  for (let i = 0; i < text.length; i += 1) {
+    const ch = text[i]
+    if (inQuotes) {
+      if (ch === '"') {
+        if (text[i + 1] === '"') {
+          field += '"'
+          i += 1
+        } else {
+          inQuotes = false
+        }
+      } else {
+        field += ch
+      }
+    } else if (ch === '"') {
+      inQuotes = true
+    } else if (ch === ',') {
+      row.push(field)
+      field = ''
+    } else if (ch === '\n' || ch === '\r') {
+      if (ch === '\r' && text[i + 1] === '\n') i += 1
+      row.push(field)
+      field = ''
+      if (row.some((c) => c.trim() !== '')) rows.push(row)
+      row = []
+    } else {
+      field += ch
+    }
+  }
+  row.push(field)
+  if (row.some((c) => c.trim() !== '')) rows.push(row)
+  return rows
+}
+
+/** 解析 CSV done 列：1/true/是/完成/✓/y/yes 视为已解决。 */
+function parseDoneValue(v: string): boolean {
+  const s = v.trim().toLowerCase()
+  return s === '1' || s === 'true' || s === '是' || s === '完成' || s === '✓' || s === 'y' || s === 'yes'
+}
+
+function listKeyOf(value: string): PetListKey | null {
+  const v = value.trim()
+  if (v === 'main' || v === '主线任务') return 'main'
+  if (v === 'recent' || v === '近期任务') return 'recent'
+  if (v === 'misc' || v === '杂事') return 'misc'
+  return null
+}
+
+async function handlePetImport(text: string, fileName: string): Promise<void> {
+  const isCsv = /\.csv$/i.test(fileName)
+  const rawRows: Array<Record<string, unknown>> = []
+  if (isCsv) {
+    const rows = parseCsvRows(text.replace(/^\uFEFF/, ''))
+    if (rows.length === 0) {
+      petStatus('导入失败：文件为空', true)
+      return
+    }
+    const header = rows[0].map((c) => c.trim().toLowerCase())
+    const nameIdx = header.indexOf('name')
+    if (nameIdx < 0) {
+      petStatus('导入失败：CSV 缺 name 列（表头应为 name,tags,priority,list）', true)
+      return
+    }
+    const tagsIdx = header.indexOf('tags')
+    const prioIdx = header.indexOf('priority')
+    const listIdx = header.indexOf('list')
+    const doneIdx = header.indexOf('done')
+    for (let i = 1; i < rows.length; i += 1) {
+      const r = rows[i]
+      const obj: Record<string, unknown> = { name: (r[nameIdx] ?? '').trim() }
+      if (tagsIdx >= 0 && r[tagsIdx] !== undefined) obj.tags = r[tagsIdx].trim()
+      if (prioIdx >= 0 && r[prioIdx] !== undefined) obj.priority = r[prioIdx].trim()
+      if (listIdx >= 0 && r[listIdx] !== undefined) {
+        const k = listKeyOf(r[listIdx])
+        if (k) obj.list = k
+      }
+      if (doneIdx >= 0 && r[doneIdx] !== undefined) obj.done = parseDoneValue(r[doneIdx])
+      rawRows.push(obj)
+    }
+  } else {
+    try {
+      const parsed = JSON.parse(text) as unknown
+      let arr: unknown[] | null = null
+      if (Array.isArray(parsed)) {
+        arr = parsed
+      } else if (typeof parsed === 'object' && parsed !== null && Array.isArray((parsed as { items?: unknown }).items)) {
+        arr = (parsed as { items: unknown[] }).items
+      }
+      if (!arr) {
+        petStatus('导入失败：JSON 应为数组，或含 items 数组的对象', true)
+        return
+      }
+      rawRows.push(...arr.map((r) => (typeof r === 'object' && r !== null ? r as Record<string, unknown> : { name: String(r) })))
+    } catch {
+      petStatus('导入失败：JSON 格式非法', true)
+      return
+    }
+  }
+  // 逐行校验并按目标列表分组
+  const grouped: Record<PetListKey, Array<{ id: string; name: string; tags: string; priority: string; done: boolean }>> = { main: [], recent: [], misc: [] }
+  for (const r of rawRows) {
+    const name = typeof r.name === 'string' ? r.name.trim() : ''
+    if (!name) continue
+    const list: PetListKey = typeof r.list === 'string' ? (listKeyOf(r.list) ?? 'misc') : 'misc'
+    grouped[list].push({
+      id: petGenIdLocal(),
+      name: name.slice(0, 200),
+      tags: typeof r.tags === 'string' ? r.tags.slice(0, 100) : '',
+      priority: typeof r.priority === 'string' ? r.priority.slice(0, 20) : '',
+      done: r.done === true,
+    })
+  }
+  let total = 0
+  for (const key of PET_LIST_KEYS) total += grouped[key].length
+  if (total === 0) {
+    petStatus('导入失败：没有有效条目（name 不能为空）', true)
+    return
+  }
+  let added = 0
+  let skipped = 0
+  for (const key of PET_LIST_KEYS) {
+    const rows2 = grouped[key]
+    if (rows2.length === 0) continue
+    const res = await apiCall('import-todos', { b64: b64EncodeJson({ items: rows2, list: key }) })
+    if (res?.ok) {
+      added += res.added ?? 0
+      skipped += res.skipped ?? 0
+      if (typeof res.b64 === 'string' && res.b64) {
+        try { petData = normalizePetDataLocal(b64DecodeJson(res.b64)) } catch { /* 忽略 */ }
+      }
+    } else {
+      petStatus(`导入失败：${res?.error ?? '未知错误'}`, true)
+      return
+    }
+  }
+  refreshPetPanelBody()
+  petStatus(`导入完成：新增 ${added} 条，跳过重复 ${skipped} 条`)
+}
+
+/* ── 面板开合与定位 ── */
+function togglePetPanel(): void {
+  if (petPanelOpen) closePetPanel()
+  else openPetPanel()
+}
+
+function openPetPanel(): void {
+  if (!petPanel) return
+  petPanelOpen = true
+  petPanel.style.display = 'flex'
+  positionPetPanel()
+  refreshPetPanelBody()
+}
+
+function closePetPanel(): void {
+  if (!petPanel) return
+  petPanelOpen = false
+  petPanel.style.display = 'none'
+  closePetItemPopup()
+}
+
+function positionPetPanel(): void {
+  if (!petPanel || !petEl) return
+  const pr = petEl.getBoundingClientRect()
+  const w = petData?.pet.panelWidth ?? 360
+  const maxH = Math.min(window.innerHeight - 24, 560)
+  const leftSpace = pr.left
+  const rightSpace = window.innerWidth - pr.right
+  let left: number
+  if (leftSpace >= w + 24) left = pr.left - w - 12
+  else if (rightSpace >= w + 24) left = pr.right + 12
+  else left = Math.max(8, window.innerWidth - w - 8)
+  const top = clamp(pr.top, 8, Math.max(8, window.innerHeight - maxH - 8))
+  petPanel.style.left = `${Math.round(left)}px`
+  petPanel.style.top = `${Math.round(top)}px`
+  petPanel.style.width = `${w}px`
+  petPanel.style.maxHeight = `${maxH}px`
+}
+
+/* ── 桌宠初始化 ── */
+function initPet(ctx: CtxLike): void {
+  const style = document.createElement('style')
+  style.id = 'dsh-style-asoul-pet-css'
+  style.textContent = PET_CSS
+
+  const pet = buildPetEl()
+  petEl = pet
+  pet.style.right = '16px'
+  pet.style.top = '16px'
+
+  const panel = buildPetPanel()
+  petPanel = panel
+  panel.style.display = 'none'
+  panel.style.opacity = '0.95'
+
+  const onDocMouseDown = (e: MouseEvent): void => {
+    if (!petPanelOpen) return
+    const t = e.target as Node | null
+    if (t && pet.contains(t)) return
+    if (t && panel.contains(t)) return
+    closePetPanel()
+  }
+
+  // ⚠️ cordis ctx.effect 语义：回调立即执行（注册资源），返回函数才是 dispose 清理。
+  // 挂载必须放在回调体里，清理放在返回值里——否则桌宠刚挂载就被删掉（上一版 bug）。
+  ctx.effect(() => {
+    ;(document.head || document.body).appendChild(style)
+    document.body.appendChild(pet)
+    document.body.appendChild(panel)
+    document.addEventListener('mousedown', onDocMouseDown)
+    return () => {
+      pet.remove()
+      panel.remove()
+      document.removeEventListener('mousedown', onDocMouseDown)
+      style.remove()
+      petEl = null
+      petPanel = null
+      petStatusLine = null
+      petItemPopup = null
+    }
+  }, `${PKG}: desktop pet`)
+
+  void (async () => {
+    const res = await apiCall('get-pet')
+    let loaded: unknown = null
+    if (res?.ok && typeof res.b64 === 'string' && res.b64) {
+      try { loaded = b64DecodeJson(res.b64) } catch { loaded = null }
+    }
+    petData = loaded ? normalizePetDataLocal(loaded) : { lists: { main: [], recent: [], misc: [] }, pet: { x: null, y: null, panelWidth: 360, opacity: 0.95, enabled: true } }
+    const { x, y, panelWidth, opacity } = petData.pet
+    if (x !== null && y !== null) {
+      pet.style.left = `${Math.round(x)}px`
+      pet.style.top = `${Math.round(y)}px`
+      pet.style.right = 'auto'
+    }
+    panel.style.width = `${panelWidth}px`
+    panel.style.opacity = String(opacity)
+    applyPetOpacity()
+    applyPetVisibility()
+    refreshPetPanelBody()
+  })()
+}
+
+/* ── 桌宠样式（主色 #E799B0，面板底色更淡的粉） ── */
+const PET_CSS = `
+.asoul-pet {
+  position: fixed;
+  z-index: 2147483000;
+  width: 96px;
+  height: 96px;
+  cursor: grab;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-app-region: no-drag;
+  touch-action: none;
+}
+.asoul-pet:active { cursor: grabbing; }
+.asoul-pet-img {
+  width: 96px;
+  height: 96px;
+  border-radius: 50%;
+  object-fit: cover;
+  object-position: 50% 18%;
+  border: 3px solid #E799B0;
+  box-shadow: 0 4px 16px rgba(231, 153, 176, 0.55);
+  display: block;
+  pointer-events: none;
+  background: #FDEFF4;
+}
+.asoul-petpanel {
+  position: fixed;
+  z-index: 2147482999;
+  display: flex;
+  flex-direction: row;
+  background: #FFF9FB;
+  border: 1px solid #F2C7D6;
+  border-radius: 14px;
+  box-shadow: 0 8px 28px rgba(231, 153, 176, 0.35);
+  overflow: hidden;
+  color: #4A3540;
+  font-size: 13px;
+}
+.asoul-petpanel-tabs {
+  display: flex;
+  flex-direction: column;
+  width: 84px;
+  flex: 0 0 84px;
+  background: #FDEFF4;
+  padding: 10px 6px;
+  gap: 4px;
+  border-right: 1px solid #F6D7E2;
+}
+.asoul-petpanel-tab {
+  border: none;
+  background: transparent;
+  color: #8A6E7B;
+  padding: 8px 6px;
+  border-radius: 8px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+  text-align: left;
+}
+.asoul-petpanel-tab:hover { background: rgba(231, 153, 176, 0.18); }
+.asoul-petpanel-tab.on { background: #E799B0; color: #fff; font-weight: 600; }
+.asoul-petpanel-body {
+  flex: 1;
+  min-width: 0;
+  padding: 12px 14px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.asoul-petpanel-title { font-weight: 600; color: #C96E8B; font-size: 13px; }
+.asoul-pet-empty { color: #B8A4AC; font-size: 12px; padding: 10px 0; }
+.asoul-pet-list { display: flex; flex-direction: column; gap: 6px; }
+.asoul-pet-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  background: #FFFFFF;
+  border: 1px solid #F8E3EA;
+  border-radius: 10px;
+  padding: 8px 10px;
+  cursor: pointer;
+}
+.asoul-pet-item:hover { border-color: #E799B0; }
+.asoul-pet-item.dragging { opacity: 0.5; }
+.asoul-pet-item.done { opacity: 0.5; }
+.asoul-pet-item.editing { cursor: default; }
+.asoul-pet-item-main { flex: 1; min-width: 0; }
+.asoul-pet-editbtn {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: none;
+  background: transparent;
+  color: #C9A3B1;
+  cursor: pointer;
+  font-size: 13px;
+  line-height: 1;
+  padding: 0;
+  font-family: inherit;
+}
+.asoul-pet-editbtn:hover { color: #E799B0; }
+.asoul-pet-edit { display: flex; flex-direction: column; gap: 6px; flex: 1; }
+.asoul-pet-edit input, .asoul-pet-edit select {
+  border: 1px solid #F2C7D6;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: "Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif;
+  color: #4A3540;
+  background: #fff;
+  outline: none;
+}
+.asoul-pet-edit input:focus, .asoul-pet-edit select:focus { border-color: #E799B0; }
+.asoul-pet-edit-actions { display: flex; gap: 6px; }
+.asoul-pet-check {
+  flex: 0 0 auto;
+  width: 18px;
+  height: 18px;
+  border: 1.5px solid #E3A8BC;
+  border-radius: 5px;
+  background: #FFFFFF;
+  color: #FFFFFF;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0;
+  font-family: inherit;
+  transition: background-color 0.12s ease;
+}
+.asoul-pet-check:hover { border-color: #E799B0; }
+.asoul-pet-check.on { background: #E799B0; border-color: #E799B0; }
+.asoul-pet-item-name {
+  font-family: "Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif;
+  font-size: 13px;
+  color: #4A3540;
+  word-break: break-all;
+}
+.asoul-pet-item-meta {
+  display: flex;
+  gap: 8px;
+  margin-top: 3px;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+.asoul-pet-item-tags { color: #A99BA2; font-size: 11px; }
+.asoul-pet-item-prio { color: #A99BA2; font-size: 11px; }
+.asoul-pet-item-pop {
+  position: absolute;
+  top: 4px;
+  right: 6px;
+  display: flex;
+  gap: 4px;
+  background: #FFF9FB;
+  border-radius: 8px;
+  padding: 2px;
+}
+.asoul-pet-pop-btn {
+  border: 1px solid #F2C7D6;
+  background: #FFFFFF;
+  color: #8A6E7B;
+  border-radius: 6px;
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: 11px;
+  font-family: inherit;
+}
+.asoul-pet-pop-btn.danger { background: #E799B0; border-color: #E799B0; color: #fff; }
+.asoul-pet-row { display: flex; align-items: center; gap: 8px; }
+.asoul-pet-row-label { flex: 0 0 auto; min-width: 68px; color: #8A6E7B; font-size: 12px; }
+.asoul-pet-range { flex: 1; accent-color: #E799B0; }
+.asoul-pet-row-value { flex: 0 0 36px; text-align: right; color: #8A6E7B; font-size: 11px; font-variant-numeric: tabular-nums; }
+.asoul-pet-form { display: flex; flex-direction: column; gap: 6px; }
+.asoul-pet-form input, .asoul-pet-form select {
+  border: 1px solid #F2C7D6;
+  border-radius: 8px;
+  padding: 6px 8px;
+  font-size: 12px;
+  font-family: "Microsoft YaHei", "微软雅黑", "PingFang SC", sans-serif;
+  color: #4A3540;
+  background: #fff;
+  outline: none;
+}
+.asoul-pet-form input:focus, .asoul-pet-form select:focus { border-color: #E799B0; }
+.asoul-pet-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.asoul-pet-btn {
+  border: 1px solid #F2C7D6;
+  background: #FFFFFF;
+  color: #8A6E7B;
+  border-radius: 8px;
+  padding: 6px 12px;
+  cursor: pointer;
+  font-size: 12px;
+  font-family: inherit;
+}
+.asoul-pet-btn:hover { background: #FDEFF4; }
+.asoul-pet-btn.primary { background: #E799B0; border-color: #E799B0; color: #fff; }
+.asoul-pet-btn.primary:hover { background: #Df8ea5; }
+.asoul-pet-hint { color: #B8A4AC; font-size: 11px; line-height: 1.5; margin: 0; }
+.asoul-pet-status { color: #7FBF8F; font-size: 12px; min-height: 16px; }
+.asoul-pet-status.err { color: #D2647F; }
+`
 
 /* ── 入口 ── */
 export function apply(ctx: CtxLike): void {
@@ -692,6 +1686,9 @@ export function apply(ctx: CtxLike): void {
     order: 40,
     label: () => '外观风格',
   }, AsoulSettingsPage))
+
+  // 嘉然桌宠（悬浮 + 拖拽 + Todo 面板）
+  initPet(ctx)
 
   void init()
 }
@@ -730,11 +1727,16 @@ function installSkinCss(ctx: CtxLike): void {
   if (sheet === null || String(sheet.tagName || '').toUpperCase() !== 'STYLE') {
     sheet = document.createElement('style')
     sheet.id = SKIN_CSS_ID
-    ;(document.head || document.body).appendChild(sheet)
   }
   sheet.textContent = SKIN_CSS
+  // ⚠️ cordis ctx.effect：回调立即执行（挂载），返回函数为 dispose 清理。
   ctx.effect(() => {
-    if (document.getElementById(SKIN_CSS_ID) === sheet) sheet.remove()
+    if (sheet !== null && document.getElementById(SKIN_CSS_ID) !== sheet) {
+      ;(document.head || document.body).appendChild(sheet)
+    }
+    return () => {
+      if (document.getElementById(SKIN_CSS_ID) === sheet) sheet.remove()
+    }
   }, `${PKG}: skin css`)
 }
 

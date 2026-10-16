@@ -1,7 +1,7 @@
 {
   "name": "dsh-style-asoul",
-  "version": "0.1.0",
-  "description": "A-SOUL 外观风格插件：亮色基调+可选夜间模式、咖啡色/豆沙绿主色调、自定义背景图（默认嘉然壁纸 alpha 0.3）、设置面板 + 持久化 + 一键还原。适用于 DSH desktop 与 webui。",
+  "version": "0.2.0",
+  "description": "A-SOUL 外观风格插件：亮色基调+可选夜间模式、咖啡色/豆沙绿/贝拉/嘉然/乃琳主色调、自定义背景图、嘉然桌宠挂件（TodoList 面板）。适用于 DSH desktop 与 webui。",
   "type": "module",
   "main": "lib/index.js",
   "exports": {

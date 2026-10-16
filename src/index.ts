@@ -166,6 +166,164 @@ function mimeOf(file: string): string {
   }
 }
 
+/* ── 嘉然桌宠数据（pet.json：待办三列表 + 桌宠外观/位置） ── */
+export interface PetTodoItem {
+  id: string
+  name: string
+  tags: string
+  priority: string
+  done: boolean
+}
+
+export interface PetData {
+  lists: {
+    main: PetTodoItem[]
+    recent: PetTodoItem[]
+    misc: PetTodoItem[]
+  }
+  pet: {
+    x: number | null
+    y: number | null
+    panelWidth: number
+    opacity: number
+    enabled: boolean
+  }
+}
+
+const PET_FILE = join(CONFIG_DIR, 'pet.json')
+const PET_EXPORT_DIR = join(CONFIG_DIR, 'exports')
+const PET_LIST_KEYS: readonly string[] = ['main', 'recent', 'misc']
+const PET_DEFAULTS: PetData = {
+  lists: { main: [], recent: [], misc: [] },
+  pet: { x: null, y: null, panelWidth: 360, opacity: 0.95, enabled: true },
+}
+
+function petGenId(): string {
+  return `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`
+}
+
+function normalizePetItem(raw: unknown): PetTodoItem | null {
+  const input = asRecord(raw)
+  const name = typeof input.name === 'string' ? input.name.trim() : ''
+  if (!name) return null
+  return {
+    id: typeof input.id === 'string' && input.id !== '' ? input.id : petGenId(),
+    name: name.slice(0, 200),
+    tags: typeof input.tags === 'string' ? input.tags.slice(0, 100) : '',
+    priority: typeof input.priority === 'string' ? input.priority.slice(0, 20) : '',
+    done: input.done === true,
+  }
+}
+
+/** 读取桌宠数据；文件缺失/损坏时回退默认。 */
+export function readPet(): PetData {
+  if (!existsSync(PET_FILE)) return JSON.parse(JSON.stringify(PET_DEFAULTS)) as PetData
+  try {
+    const raw = JSON.parse(readFileSync(PET_FILE, 'utf8')) as Json
+    const listsIn = asRecord(raw.lists)
+    const lists: PetData['lists'] = { main: [], recent: [], misc: [] }
+    for (const key of PET_LIST_KEYS) {
+      const arr = listsIn[key]
+      if (Array.isArray(arr)) {
+        for (const item of arr) {
+          const norm = normalizePetItem(item)
+          if (norm) lists[key as 'main' | 'recent' | 'misc'].push(norm)
+        }
+      }
+    }
+    const petIn = asRecord(raw.pet)
+    const x = typeof petIn.x === 'number' ? clamp(petIn.x, -2000, 20000) : null
+    const y = typeof petIn.y === 'number' ? clamp(petIn.y, -2000, 20000) : null
+    return {
+      lists,
+      pet: {
+        x,
+        y,
+        panelWidth: clamp(Number(petIn.panelWidth ?? 360), 280, 520),
+        opacity: clamp(Number(petIn.opacity ?? 0.95), 0.3, 1),
+        enabled: typeof petIn.enabled === 'boolean' ? petIn.enabled : true,
+      },
+    }
+  } catch {
+    return JSON.parse(JSON.stringify(PET_DEFAULTS)) as PetData
+  }
+}
+
+/** 写入桌宠数据（校验后落盘）。 */
+export function writePet(data: unknown): PetData {
+  const clean = readPet()
+  const input = asRecord(data)
+  const listsIn = asRecord(input.lists)
+  for (const key of PET_LIST_KEYS) {
+    const arr = listsIn[key]
+    if (Array.isArray(arr)) {
+      const next: PetTodoItem[] = []
+      for (const item of arr) {
+        const norm = normalizePetItem(item)
+        if (norm) next.push(norm)
+      }
+      clean.lists[key as 'main' | 'recent' | 'misc'] = next
+    }
+  }
+  const petIn = asRecord(input.pet)
+  if (typeof petIn.panelWidth === 'number') clean.pet.panelWidth = clamp(petIn.panelWidth, 280, 520)
+  if (typeof petIn.opacity === 'number') clean.pet.opacity = clamp(petIn.opacity, 0.3, 1)
+  if (typeof petIn.enabled === 'boolean') clean.pet.enabled = petIn.enabled
+  if (typeof petIn.x === 'number') clean.pet.x = clamp(petIn.x, -2000, 20000)
+  if (typeof petIn.y === 'number') clean.pet.y = clamp(petIn.y, -2000, 20000)
+  if (petIn.x === null) clean.pet.x = null
+  if (petIn.y === null) clean.pet.y = null
+  mkdirSync(CONFIG_DIR, { recursive: true })
+  // 写前备份：防止误覆盖丢数据（保留最近一版）
+  try {
+    if (existsSync(PET_FILE)) writeFileSync(`${PET_FILE}.bak`, readFileSync(PET_FILE, 'utf8'), 'utf8')
+  } catch { /* 备份失败不阻塞 */ }
+  writeFileSync(PET_FILE, JSON.stringify(clean, null, 2), 'utf8')
+  return clean
+}
+
+function allPetNames(data: PetData): Set<string> {
+  const names = new Set<string>()
+  for (const key of PET_LIST_KEYS) {
+    for (const item of data.lists[key as 'main' | 'recent' | 'misc']) names.add(item.name)
+  }
+  return names
+}
+
+/* ── 桌宠 API 的 base64 传输（dsh-app:// 协议会转坏多字节 UTF-8，纯 ASCII 免疫） ── */
+function petEncode(value: unknown): string {
+  return Buffer.from(JSON.stringify(value), 'utf8').toString('base64')
+}
+
+function petDecodeArg(args: Json): Json {
+  const b64 = args.b64
+  if (typeof b64 === 'string' && b64 !== '') {
+    try {
+      const parsed = JSON.parse(Buffer.from(b64, 'base64').toString('utf8')) as Json
+      return parsed
+    } catch { /* 解码失败回退到明文 args */ }
+  }
+  return args
+}
+
+const PET_LIST_LABELS_HOST: Record<string, string> = { main: '主线任务', recent: '近期任务', misc: '杂事' }
+
+function csvEscapeHost(v: string): string {
+  if (/[",\n\r]/.test(v)) return `"${v.replace(/"/g, '""')}"`
+  return v
+}
+
+/** 宿主侧生成待办 CSV（中文不经过协议层，避免乱码）。 */
+function buildTodosCsvHost(data: PetData): string {
+  const lines = ['name,tags,priority,list,done']
+  for (const key of PET_LIST_KEYS) {
+    for (const item of data.lists[key as 'main' | 'recent' | 'misc']) {
+      lines.push([item.name, item.tags, item.priority, PET_LIST_LABELS_HOST[key], item.done ? '1' : '0'].map(csvEscapeHost).join(','))
+    }
+  }
+  return lines.join('\r\n')
+}
+
 /**
  * Host 插件主体：注册 /dsh-style-asoul/api 路由。
  * @param ctx - cordis host context（声明 inject: ['webServer']）。
@@ -223,6 +381,52 @@ export function apply(ctx: CtxLike): void {
               } catch { /* 诊断落盘失败不阻塞 */ }
             }
             json(res, 200, { ok: true })
+            return
+          }
+          case 'get-pet': {
+            json(res, 200, { ok: true, b64: petEncode(readPet()) })
+            return
+          }
+          case 'set-pet': {
+            json(res, 200, { ok: true, b64: petEncode(writePet(petDecodeArg(args))) })
+            return
+          }
+          case 'import-todos': {
+            // 追加导入：先校验条目形状，再按名称全局去重，只追加不覆盖。
+            const input = petDecodeArg(args) as Json
+            const data = readPet()
+            const target = PET_LIST_KEYS.includes(String(input.list)) ? input.list as 'main' | 'recent' | 'misc' : 'misc'
+            const rows: PetTodoItem[] = []
+            if (Array.isArray(input.items)) {
+              for (const item of input.items) {
+                const norm = normalizePetItem(item)
+                if (norm) rows.push(norm)
+              }
+            }
+            const existing = allPetNames(data)
+            let added = 0
+            let skipped = 0
+            for (const row of rows) {
+              if (existing.has(row.name)) {
+                skipped += 1
+                continue
+              }
+              existing.add(row.name)
+              data.lists[target].push(row)
+              added += 1
+            }
+            mkdirSync(CONFIG_DIR, { recursive: true })
+            writeFileSync(PET_FILE, JSON.stringify(data, null, 2), 'utf8')
+            json(res, 200, { ok: true, added, skipped, total: added + skipped, b64: petEncode(data) })
+            return
+          }
+          case 'export-todos': {
+            const csv = buildTodosCsvHost(readPet())
+            mkdirSync(PET_EXPORT_DIR, { recursive: true })
+            const stamp = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19)
+            const file = join(PET_EXPORT_DIR, `todos-${stamp}.csv`)
+            writeFileSync(file, `\uFEFF${csv}`, 'utf8')
+            json(res, 200, { ok: true, path: file })
             return
           }
           default: {

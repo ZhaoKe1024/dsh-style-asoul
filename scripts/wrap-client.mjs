@@ -26,6 +26,20 @@ try {
   console.warn('wallpaper embed skipped:', err && err.message)
 }
 
+// Embed the desktop pet photo (嘉然桌宠形象).
+try {
+  const petImg = join(root, 'assets', 'jiaran_desktop-photo.png')
+  const petDataUrl = 'data:image/png;base64,' + readFileSync(petImg).toString('base64')
+  const petMatch = body.match(/['"]__DSH_ASOUL_PET_EMBED__['"]/)
+  if (!petMatch) {
+    throw new Error('pet placeholder marker not found in compiled client')
+  }
+  body = body.replace(petMatch[0], JSON.stringify(petDataUrl))
+  console.log(`embedded desktop pet photo (${petDataUrl.length} chars)`)
+} catch (err) {
+  console.warn('pet photo embed skipped:', err && err.message)
+}
+
 writeFileSync(out, [
   'window.__ModuleLoader__.load({',
   '  id: "dsh-style-asoul",',

@@ -6,6 +6,14 @@ interface ImportMeta {
   url: string
 }
 
+interface NodeJsBuffer {
+  toString(encoding: string): string
+}
+
+declare const Buffer: {
+  from(data: string, encoding: string): NodeJsBuffer
+}
+
 declare module 'node:fs' {
   interface NodeBuffer {
     toString(encoding: string): string
